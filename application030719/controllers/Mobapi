@@ -1,0 +1,845 @@
+<?php
+
+defined('BASEPATH') OR exit('No direct script access allowed');
+
+class Mobapi extends CI_Controller {
+	private $userid;
+    function __construct(){
+        parent::__construct();
+        $api_key  = $this->input->get_request_header('Authorization');
+        if(isset($api_key) && $api_key!=''){
+        	if(!$this->isValidApiKey($api_key)){
+        		responseJSON(array("error" =>true, "message" => "Access Denied. Invalid Api key"));
+        		return false;
+        	}
+        }
+        $this->load->model('Mobileapi','Mobile');
+    }
+
+    private function isValidApiKey($api_key){
+    	$this->userid = getuserid('users',$api_key);
+    	return $this->userid;
+    }
+
+	//-----------pincode---------
+	public function pincode($zipcode)
+    {
+    	$response = array();
+        if(getpinExist($zipcode)){
+            $response["error"] = false;
+            $response['stores'] = $this->Model->get_stores_by_zipcode($zipcode)
+            $response['current_time'] = time();
+        }else{
+            $response["error"] = true;
+            $response["message"] = "Invalid zipcode";
+        }
+        responseJSON($response);
+    }
+
+    //------------Registration------------
+    public function registration(){
+        $social_media_register = $this->input->post('social_media_register');
+        $this->form_validation->set_rules('first_name', 'Frist name', 'required');
+        $this->form_validation->set_rules('last_name', 'Last name', 'required');
+        $this->form_validation->set_rules('pincode', 'Pin code', 'required');
+        $this->form_validation->set_rules('divicetype', 'Device Type', 'required');
+        $this->form_validation->set_rules('deviceid', 'Device id', 'required');
+        $this->form_validation->set_rules('emailid', 'Email', 'required|valid_email|is_unique[users.email_id]',
+        array(
+                'required'      => 'You have not provided %s.',
+                'is_unique'     => 'This %s already exists.'
+        ));
+        $this->form_validation->set_rules('mobile', 'Mobile', 'required|is_unique[users.mobile]',
+        array(
+                'required'      => 'You have not provided %s.',
+                'is_unique'     => 'This %s already exists.'
+        ));
+        $response = array();
+        if($this->form_validation->run()== true){
+            $first_name = html_escape($this->input->post('first_name'));
+            $last_name = html_escape($this->input->post('last_name'));
+            $email = $this->input->post('emailid');
+            $mobile = $this->input->post('mobile');
+		    $address = $this->input->post('address');
+		    $pincode = $this->input->post('pincode');
+		    $password = $this->input->post('password');
+		    $devicetype = $this->input->post('divicetype');
+		    $deviceid = $this->input->post('deviceid');
+		    $referral_code = $this->input->post('referral_code');
+		    $referral_code = empty($referral_code) ? null : $referral_code;
+		    $social_media_register = $app->request->post('social_media_register');
+		    $regtype = NULL;
+  			if($social_media_register=="true"){
+	            $password = "socialmedialogin";
+	            $regtype = "gmail";
+	        }
+            $uuid = $this->db->set('id', 'UUID()', FALSE);
+            $data = array(
+                "first_name" => $first_name,
+                "last_name" => $last_name, 
+                "email_id" => $email,
+                "password" => getHashedPassword($password),
+                "mobile" => $mobile,
+                "address" => json_encode($this->input->post('address')),
+                "pincode" => $pincode,
+                'logintype'=>$regtype);
+            if($this->Model->get_record('avl_pincode',array('pincode' =>$pincode , 'status' => '0'))){
+                $rec = $this->Model->get_city_state_country($pincode);
+                if(count($rec) > 0){
+                    $data['country_id'] = $rec[0]['countryid'];
+                    $data['state_id'] = $rec[0]['stateid'];
+                    $data['city_id']= $rec[0]['cityid'];
+                }
+                $referral_code_valid = true; $referred_by_user_id = null;
+                if($referral_code != null){
+                    $referred_by_user_id = $this->Model->get_selected_data('id','users',$where=array('referral_code' => $referral_code),$order=FALSE,$type=FALSE,$limit=FALSE,$start=FALSE);
+                    if(!$referred_by_user_id){
+                        $referral_code_valid = false;
+                    }
+                }
+                if($referral_code_valid){
+                    $time = time();
+                    $data['referral_code'] = $this->getUniqueReferralCode($first_name);
+                    $data['unitime'] = $time;
+                    $data['api_key'] = generateApiKey();
+                    $data['max_referrals_allowed'] = MAX_REFERRALS_ALLOWED;
+                    //-------------Insert user record --------------
+                    $create_user =  $this->Model->create_user('users',$data);
+                    if($create_user){
+                        $create_user_id = $this->Model->get_selected_data('id','users',array('email_id' => $email));
+                        $create_user_id = $create_user_id[0]['id'];
+                        if (!($referral_code == null && $referred_by_user_id == null)) {
+                            $this->addReferralFieldsToUsers($referred_by_user_id[0]['id'], $create_user_id);
+                        }
+                        //------------Send mail to user-------------
+                        $username =  $first_name .' '. $last_name;
+                        $udata['username'] =  $username;
+                        $subject = 'Welcome,' . $username . ' to the Go2Gro family';
+                        $mail_msg = $this->load->view('go2gro_web/template/registration',$udata,true);
+                        $issendmail = send_mail($email,$subject,$mail_msg);
+                        if ($issendmail) {
+                            $response["ismailsend"] = "Mail send sucessfully";
+                        } else {
+                            $response["ismailsend"] = "Mail Not send sucessfully";
+                        }
+                        //----------------
+                        $msg = "Welcome," . $username . " to the Go2Gro family! \n
+                        Go2Gro is happy to see you sign up. \n
+                        Please click on the given link to verify your mobile no and get your first order at $0 delivery Charges.\n
+                        www.Go2Gro.com/" . verifymobile . "/mobile.php?v=" .$create_user_id;
+                        $message = urlencode($msg);
+                        $issendsms = sendsms($mobile, $message);
+                        if ($issendsms) {
+                            $response["issmssend"] = "SMS send sucessfully";
+                        } else {
+                            $response["issmssend"] = "SMS Not send sucessfully";
+                        }
+                        $welmsg = "Welcome, " . $username . "  to the Go2Gro family! \n
+                        Go2Gro is happy to see you sign up – we endeavor to never disappoint! We are here to save your run to the grocery store, ensuring
+                        fresh groceries in your kitchen. \n Please verify your number by clicking on the verification link sent to your phone number to
+                        get a free delivery on your first order. \n A link will be sent to your phone number after you create an account";
+
+                        $welmessage = urlencode($welmsg);
+                        $issendwelcomesms = sendsms($mobile, $welmessage);
+                        if ($issendwelcomesms) {
+                            $response["issendwelcomesms"] = "SMS send sucessfully";
+                        } else {
+                            $response["issendwelcomesms"] = "SMS Not send sucessfully";
+                        }
+                        $response["error"] = false;
+                        $response["message"] = "You are successfully registered";
+                        $response["user"] = $create_user_id;
+                    }
+                    else {
+                        $response["error"] = true;
+                        $response['message']= USER_CREATE_FAILED;
+                    }
+                }else{
+                    $response["error"] = true;
+                    $response['message']= INVALID_REF_CODE;
+                }
+            }else{
+                $response["error"] = true;
+                $response["message"] = "Pincode Not valid";
+            }
+        }else{
+            $response["error"] = true;
+            $response['message'] = strip_tags(validation_errors());
+        }
+        responseJSON($response);
+    }
+
+    //-----------login----------
+    public  function login(){
+    	$this->form_validation->set_rules('email', 'Email', 'required|valid_email');
+        $this->form_validation->set_rules('password', 'password', 'required');
+        $this->form_validation->set_rules('divicetype', 'Device type', 'required');
+        $this->form_validation->set_rules('deviceid', 'Device id', 'required');
+        $response = array();
+        if($this->form_validation->run()== true){
+	        $this->load->Model('Login_Model');
+
+	        $email=$this->input->post('email');
+	        $password=$this->input->post('password');
+	        $divicetype=$this->input->post('divicetype');
+	        $deviceid=$this->input->post('deviceid');
+
+	        $res = $this->Login_Model->auth_user($email,$password);
+	        if ($res != NULL) {
+	        	$userid = $res[0]->id;
+	        	//---------update deviceid----
+	        	if ($devicetype == "android") {
+		           	$checkgcmid = $this->Model->get_record('tbl_usergcm',array('divicetype' => $divicetype,'user_id' => $userid,'gcm_id' => $deviceid));
+		           	if(empty($checkgcmid)){
+		           		$this->Model->add('tbl_usergcm',array('divicetype' => $divicetype,'user_id' => $userid,'gcm_id' => $deviceid));
+		           	}
+		        } else if ($devicetype == "ios") 
+		            $checkgcmid = $this->Model->get_record('tbl_usergcm',array('divicetype' => $divicetype,'user_id' => $userid,'gcm_id' => $deviceid));
+		           	if(empty($checkgcmid)){
+		           		$this->Model->add('tbl_usergcm',array('divicetype' => $divicetype,'user_id' => $userid,'gcm_id' => $deviceid));
+		           	}
+		        }
+		        //--------update forget passsword code---
+		        $isinforgertuserid = $this->Model->get_selected_data('user_id','forgetpasswordcode',array('user_id' => $userid));
+		        if(count($isinforgertuserid) > 0){
+		        	$this->Model->update('forgetpasswordcode',array('status' => 1),array('user_id' => $userid));
+		        }
+	            $response["error"] = false;
+            	$response['user'] = $res;
+            	$response['message'] = "Welcome To Go2Grow";
+	        } else {
+	            $response['error'] = true;
+	            $response['message'] = "An error occurred. Please try again";
+	        }
+	    }else{
+            $response["error"] = true;
+            $response['message'] = strip_tags(validation_errors());
+        }
+        responseJSON($response);
+    }
+
+    //------------category--------------
+    public function category($storeid){
+    	$response = array();
+        if($storeid != ''){
+        	$check_store =$this->Model->get_record('stores',array('id' => $storeid,'status' => 'active'));
+        	if(count($check_store) > 0) {
+        		$category = $this->Model->get_all_record('category',$order='position',$type="ASC",$limit='',$start="",$where=array('store_id' => $storeid,'status'=>0));
+        		if(count($category) > 0){
+		            $response["error"] = false;
+		            $response["category"] = $category;
+		            $response['store'] = $check_store[0];
+		            $response['current_time'] = time();
+		            $response["message"] = "Category list avaliable";
+		        }else {
+		            $response["error"] = true;
+		            $response["message"] = "No Categories Available";
+		        }
+        	}else {
+		        $response["error"] = true;
+		        $response["message"] = "Invalid Store ID!";
+		    }
+        }else{
+            $response["error"] = true;
+            $response['message'] = 'Store id required';
+        }
+        responseJSON($response);
+    }
+
+    //---------get BestSeller------------
+    public function bestseller()
+    {
+    	$response = array();
+    	$this->form_validation->set_rules('store_id', 'Store id', 'required');
+        if($this->form_validation->run()== true){
+	        $storeid = $this->input->get('store_id');
+	        $userid = $this->input->get('user_id');
+	        $check_store =$this->Model->get_record('stores',array('id' => $storeid,'status' => 'active'));
+	        if(count($check_store) > 0) {
+	            // fetching all user tasks
+	            if(isset($userid) && $userid==0){
+	                $where = array('p.item_status' => '0','p.discount!=' =>0);
+	            }
+	            else{
+	                $item_ids = ""; $where="";
+	                $rec = $this->Model->get_distinct_data('item_id','cart_item',array('user_id' => $userid,'status' => 0, 'store_id' =>$storeid));
+	                foreach ($rec as $value) {
+	                    $item_ids.="'".$value."',";
+	                }
+	                if(isset($item_ids) && !empty($item_ids)){
+	                    $where = "p.item_id not in(".rtrim($item_ids,',').") AND ";
+	                }
+	                $where .= "p.item_status = '0' and p.`discount`!='0'";
+	            }
+	            $result = $this->Model->getBestseller($userid,$storeid,$where,'p.`item_id`','rand()',15,0);
+	            if (count($result) > 0) {
+	                $response["bestseller"] = array();
+	                foreach ($result as $bestseller) {
+	                    array_push($response["bestseller"], $bestseller);
+	                }
+	                $response["error"] = false;
+	                $response["message"] = "Bestseller list avaliable";
+	            }else {
+	                $response["error"] = true;
+	                $response["message"] = "No Record Found";
+	            }
+	        }else{
+	            $response["error"] = true;
+	            $response["message"] = "Invalid Store ID!";
+	        }
+	    }
+        else{
+            $response["error"] = true;
+            $response['message'] = strip_tags(validation_errors());
+        }
+        responseJSON($response);
+    }
+
+    //----------password change---------
+    public function passwordchange(){
+    	$response = array();
+    	$this->form_validation->set_rules('opassword', 'Old password', 'required');
+    	$this->form_validation->set_rules('npassword', 'New password', 'required');
+        if($this->form_validation->run()== true){
+        	$api_key  = $this->input->get_request_header('Authorization');
+        	if($api_key != ''){
+        		$oldpassword = $this->input->post('opassword');
+    			$newpassword = $this->input->post('npassword');
+        		$isUserExistsbyuserid = $this->Model->get_selected_data('id','users',array('id' => $this->userid));
+        		if($isUserExistsbyuserid){
+        			$newpassword_hash =  getHashedPassword($newpassword);
+        			$useroldpass = $this->Model->get_selected_data('password','users',array('id' => $this->userid))
+        			if(verifyHashedPassword($oldpassword, $useroldpass[0]->password)){
+			            $last_id = $this->Model->update('users',array('password' => $newpassword_hash),array('id' => $this->userid));
+			            if($last_id){
+			            	$response["error"] = false;
+            				$response["message"] = "Your password change successfully";
+			            }else{
+			            	$response["error"] = true;
+            				$response["message"] = "Oops! An error occurred while password chenaged";
+			            }
+			        }else{
+			        	$response["error"] = true;
+            			$response["message"] = "Sorry, your old password does not match";
+			        }
+        		}else{
+        			$response["error"] = true;
+            		$response["message"] = "Sorry, you are not valid User";
+        		}
+        	}else{
+        		$response["error"] = true;
+            	$response['message'] = 'Api key is misssing';
+        	}
+        }
+        else{
+            $response["error"] = true;
+            $response['message'] = strip_tags(validation_errors());
+        }
+        responseJSON($response);
+    }
+
+    //-----------forgetpassreq------
+    public function forgetpassreq(){
+        $response = array();
+        $this->form_validation->set_rules('emailid', 'emailid', 'required|valid_email');
+        if($this->form_validation->run()== true){
+            $emailid = $this->input->post('emailid');
+            $user = $this->Model->get_record('users',array('email_id' => $emailid));
+            if(count($user) > 0){
+                $genratedcode = generateRandomString();
+                $userid = $user[0]['id'];
+                $username = $user[0]['first_name'] . " " . $user[0]['last_name'];
+                $urlandfix = $userid . "-" . $genratedcode;
+
+                $link = passwordurl . "forgetpassword?v=" . $urlandfix;
+                $data = array('username' => $username,'link' => $link);
+                $html = $this->load->view('go2gro_web/template/forget_password',$data,true);
+
+                $checkcodeinforget = $this->Model->get_record('forgetpasswordcode',array('user_id' => $userid,'status' => 0));
+                if(count($checkcodeinforget) > 0){
+                    $this->Model->update('forgetpasswordcode', array('code' => $genratedcode), array('user_id' => $userid));
+                    $issendmail = send_mail($emailid,'Password Reset Link',$html);
+                    if ($issendmail) {
+                        $response["ismailsend"] = "Mail send sucessfully";
+                    } else {
+                        $response["ismailsend"] = "Mail Not send sucessfully";
+                    }
+                    $response["error"] = false;
+                    $response["message"] = $username . " Don’t Worry, we got you! Let’s get you a new password";
+                }else{
+                    /*$response["error"] = true;
+                    $response["message"] = "Oops! An error occurred while password chenaged";*/
+                    $last_insert = $this->Model->add('forgetpasswordcode',array('user_id' => $userid,'code' => $genratedcode));
+                    if($last_insert){
+                        $issendmail = send_mail($emailid,'Password Reset Link',$html);
+                        if ($issendmail) {
+                            $response["ismailsend"] = "Mail send sucessfully";
+                        } else {
+                            $response["ismailsend"] = "Mail Not send sucessfully";
+                        }
+                        $response["error"] = false;
+                        $response["message"] = $username . " Don’t Worry, we got you! Let’s get you a new password";
+                    }
+                }
+            }
+        }else{
+            $response["error"] = true;
+            $response['message'] = strip_tags(validation_errors());
+        }
+        responseJSON($response);
+    }
+
+    //----------updatenewpassword--------
+    public function updatenewpassword(){
+        $response = array();
+        $this->form_validation->set_rules('password', 'Password', 'required');
+        $this->form_validation->set_rules('userid', 'User id', 'required');
+        if($this->form_validation->run()== true){
+            $userid = $this->input->post('userid');
+            $password = $this->input->post('password');
+            $checkcodeinforget = $this->Model->get_record('forgetpasswordcode',array('user_id' => $userid,'status' => 0));
+            if(count($checkcodeinforget) > 0){
+                $newpassword_hash =  getHashedPassword($password);
+                $last_id = $this->Model->update('users',array('password' => $newpassword_hash),array('id' => $this->userid));
+                if($last_id){
+                    $this->Model->update('forgetpasswordcode', array('status' => 1), array('user_id' => $userid));
+                    $response["error"] = false;
+                    $response["message"] = "password change sucessfully";
+                }else{
+                    $response["error"] = true;
+                    $response["message"] = "Oops! An error occurred while password chenaged";
+                }
+            }else{
+                $response["error"] = true;
+                $response["message"] = "No Request pending for change password";
+            }
+        }else{
+            $response["error"] = true;
+            $response['message'] = strip_tags(validation_errors());
+        }
+        responseJSON($response);
+    }
+
+    //-------------relateditem--------------
+    public function relateditem($id,$storeid)
+    {
+        $response = array();
+        $userid=$this->input->get('user_id');
+        $check_store =$this->Model->get_record('stores',array('id' => $storeid,'status' => 'active'));
+        if(count($check_store) > 0) {
+            $relateditem = $this->Mobile->mob_getRelateditem($id,$store_id);
+            if(count($result) > 0){
+                $response["reateditem"] = array();
+                foreach ($relateditem as $key => $value) {
+                   array_push($response["reateditem"], $value);
+                }
+                $response["error"] = false;
+                $response["message"] = "reated item list avaliable";
+            }else{
+                $result = $this->Mobile->mob_getBestseller($user_id,$store_id);
+                if (count($result) > 0) {
+                    $response["reateditem"] = array();
+                    foreach ($relateditem as $key => $value) {
+                       array_push($response["reateditem"], $value);
+                    }
+                    $response["error"] = false;
+                    $response["message"] = "reated item list avaliable";
+                }else {
+                    $response["error"] = true;
+                    $response["message"] = "No Record Found";
+                }
+            }
+        }else {
+            $response["error"] = true;
+            $response["message"] = "Invalid Store ID!";
+        }
+        responseJSON($response);
+    }
+
+    //--------------getItemDescription------------
+    public function getItemDescription($itemid,$storeid)
+    {
+        $response = array();
+        $getstore = $this->Model->get_record('stores',array('id' => $storeid,'status' => 'active'));
+        if (count($getstore) > 0) {
+            $re = $this->Model->isitemExists($itemId,$storeid);
+            if ($re) {
+                $result = $this->Model->getItem($itemId,$storeid);
+                if ($result != NULL) {
+                    if (count($result) > 0) {
+                        foreach ($result as $row ) {
+                           $itm = array_map('utf8_encode', $row);
+                        }
+                        $reslink = $this->Model->admin_getitemimages($itemId,$storeid);
+                        if (count($reslink) > 0) {
+                            $imagesaaray = $reslink;
+                        }
+                        $response["error"] = false;
+                        $response["item"] = $itm;
+                        $response["item"]["images"] = $imagesaaray;
+                        $response["message"] = "list get sucessfuly";
+                    }else {
+                        $response["error"] = true;
+                        $response["message"] = "The requested resource doesn't exists";
+                    }
+                }else {
+                    $response["error"] = true;
+                    $response["message"] = "The requested resource doesn't exists";
+                }
+            } else {
+                $response["error"] = true;
+                $response["message"] = "The Item doesn't exists";
+            }
+            responseJSON($response);
+        }else{
+            $response["error"] = true;
+            $response["message"] = "Invalid Store ID!";
+            responseJSON($response);
+        }
+    }
+
+    //-------------profile update-------
+    public function update_profile(){
+        $response = array();
+        $this->form_validation->set_rules('first_name', 'First name', 'required');
+        $this->form_validation->set_rules('last_name', 'Last Name', 'required');
+        $this->form_validation->set_rules('country', 'Country', 'required');
+        $this->form_validation->set_rules('state', 'State', 'required');
+        $this->form_validation->set_rules('city', 'City', 'required');
+        $this->form_validation->set_rules('pincode', 'Pincode', 'required');
+        $this->form_validation->set_rules('mobile', 'mobile', 'required');
+        if($this->form_validation->run()== true){
+            $api_key  = $this->input->get_request_header('Authorization');
+            if($api_key != ''){
+                $userid = getuserid('users',$api_key);
+                $data = array('first_name' => $this->input->post('first_name'),
+                'last_name' => $this->input->post('last_name'),
+                'address' => $this->input->post('address'),
+                'mobile' => $this->input->post('mobile'),
+                'country_id' => $this->input->post('country'),
+                'state_id' => $this->input->post('state'),
+                'city_id' => $this->input->post('city'),
+                'pincode' => $this->input->post('pincode'));
+
+                if(getpinExist($pincode)){
+                    $isUserMobileExists = $this->Model->get_record('users',array('mobile' => $mobile, 'id' => $userid));
+                    if(count($isUserMobileExists) > 0){
+                        $profileupdate = $this->Model->update('users',$data,array('id' => $userid));
+                        if($profileupdate){
+                            $resp = $this->Model->get_record('users',array('id' => $userid));;
+                            $response["error"] = false;
+                            $response["message"] = "Profile Update Successfully";
+                            $response["user"] = $resp;
+                        }else{
+                            $response["error"] = true;
+                            $response["message"] = "Oops! An error occurred while profile update";
+                        }
+                    }else{
+                        $isMobileExists = $this->Model->get_record('users',array('mobile' => $mobile));
+                        if(count($isMobileExists) > 0){
+                            $response["error"] = true;
+                            $response["message"] = "Sorry, this phone number is already registered with another email address. Please contact customer support at customersupport@go2gro.com for further assistance.";
+                        }
+                    }
+                }else{
+                    $response["error"] = true;
+                    $response["message"] = "Invalid zipcode";
+                }
+            }else{
+                $response["error"] = true;
+                $response['message'] = 'Api key is misssing';
+            }
+        }
+        else{
+            $response["error"] = true;
+            $response['message'] = strip_tags(validation_errors());
+        }
+        responseJSON($response);
+    }
+
+    //----------itembydept------------
+    public function itembydept($deptid, $storeid){
+        $response = array();
+        $getstore = $this->Model->get_record('stores',array('id' => $storeid,'status' => 'active'));
+        if (count($getstore) > 0) {
+            $result = $this->Model->get_selected_data(array('sub_id','sub_name','sub_image'),'subcategory',array('cat_id' => $deptid,'sab_status' =>'0'),'feature_product_status','desc');
+            if(count($result) > 0 ){
+                $item = array();
+                foreach ($result as $key => $value) {
+                    $subid = $value['sub_id'];
+                    $res = $this->Mobile->getitembysubcat($subid,$store_id);
+                    if (count($res) > 0 ) {
+                        $items = array();
+                        foreach ($res as  $subcatitem) {
+                            $subcatitem['sub_id'] = $subid;
+                            $items[] = $subcatitem;
+                        }
+                        $value['items'] = $items;
+                    }
+                    $item[] = $subcat;
+                }
+                $response["error"] = false;
+                $response["subcategory"] = $item;
+                $response["message"] = "list get sucessfuly";
+            }else{
+                $response["error"] = true;
+                $response["message"] = "The requested resource doesn't exists";
+            }
+        }
+        else{
+            $response["error"] = true;
+            $response["message"] = "Invalid Store ID!";
+        }
+        responseJSON($response);
+    }
+
+    //------------------newitemsbydepts_all-------
+    public function newitemsbydepts_all($deptid, $subid, $pageno, $unitime, $storeid){
+        $response = array();
+        $getstore = $this->Model->get_record('stores',array('id' => $storeid,'status' => 'active'));
+        $ress = false;
+        if(count($getstore) > 0){
+            if ($subid == "0") {
+                $ress = true;
+            } 
+            else {
+                $checkdptdublink = $this->Model->get_record('subcategory',array('cat_id' => $deptid,'sub_id' => $subid,'sab_status' =>0));
+                if(count($checkdptdublink) > 0){
+                    $ress = true;
+                }
+            }
+
+            if($ress){
+                $result = $this->Model->get_selected_data(array('sub_id','sub_name','sub_image'),'subcategory',array('cat_id' => $deptid,'sab_status' =>'0'),'feature_product_status','desc');
+                if(count($result) > 0 ){
+                    $item = array();
+                    if ($subid == 0) {
+                        foreach($result as $value) {
+                            $item[] = $value;
+                        }
+
+                        $getitembysubcat = $this->Model->newgetitembysubcat(array("p.id","p.item_id","CONCAT(p.`item_name`, ' ', p.`item_size`) as item_name","p.`item_sdesc`","p.`item_fdesc`","p.`item_price`","p.`item_status`","p.`Sales_tax`","inl.subcat_id","sub.sub_name","ct.id as cat_id", "IFNULL( ROUND( AVG( pr.rating ) ) , 0 ) AS rating_average","itmg.imageurl as item_image"),$storeid,$subid,array('ct.id' => $deptid,'p.item_status' =>0,'p.unitime >' => $unitime, 'inl.status' =>0),'p.`item_id`','sub.sub_id','ASC','15', $pageno);
+                        $list = array();
+                        if(count($getitembysubcat) > 0){
+                            foreach ($getitembysubcat as $row) {
+                                $row = array_map('utf8_encode', $row);
+                                $isAlreadyExists = false;
+                                foreach ($list as $x => $x_value) {
+                                    if ($row['subcat_id'] == $x_value['subcat_id']) {
+                                        $isAlreadyExists = true;
+                                        $itemlist['id'] = $row['id'];
+                                        $itemlist['item_id'] = $row['item_id'];
+                                        $itemlist['item_name'] = $row['item_name'];
+                                        $itemlist['item_sdesc'] = $row['item_sdesc'];
+                                        $itemlist['item_fdesc'] = $row['item_fdesc'];
+                                        $itemlist['item_price'] = $row['item_price'];
+                                        $itemlist['item_status'] = $row['item_status'];
+                                        $itemlist['Sales_tax'] = $row['Sales_tax'];
+                                        //  $itemlist['cart_qrt'] = $row['cart_qrt'];
+                                        $itemlist['rating_average'] = $row['rating_average'];
+                                        $itemlist['item_image'] = $row['item_image'];
+                                        array_push($list[$x]['items'], $itemlist);
+                                        break;
+                                    }
+                                }
+                                if ($isAlreadyExists == false) {
+                                    $itemlistarray = array();
+                                    $itemlist['id'] = $row['id'];
+                                    $itemlist['item_id'] = $row['item_id'];
+                                    $itemlist['item_name'] = $row['item_name'];
+                                    $itemlist['item_sdesc'] = $row['item_sdesc'];
+                                    $itemlist['item_fdesc'] = $row['item_fdesc'];
+                                    $itemlist['item_price'] = $row['item_price'];
+                                    $itemlist['item_status'] = $row['item_status'];
+                                    $itemlist['Sales_tax'] = $row['Sales_tax'];
+                                    //$itemlist['cart_qrt'] = $row['cart_qrt'];
+                                    $itemlist['rating_average'] = $row['rating_average'];
+                                    $itemlist['item_image'] = $row['item_image'];
+                                    array_push($itemlistarray, $itemlist);
+
+                                    $tendes['items'] = $itemlistarray;
+                                    $tendes['subcat_id'] = $row['subcat_id'];
+                                    $tendes['sub_name'] = $row['sub_name'];
+
+                                    $xyz = array_push($list, $tendes);
+                                }
+                            }
+                            if ($unitime == "0") {
+                                $response['updationstatus'] = "1";
+                                $response['message'] = "items get successfully";
+                            } else {
+                                $response['updationstatus'] = "3";
+                                $response['message'] = "updation requried";
+                            }
+                            $response ['items'] = $list;
+                            $response["subcategory"] = $item;
+                            $response["error"] = false;
+                            $response["unitime"] = $time;
+                            $response["subid"] = $subid;
+                        }else{
+                            if ($unitime == "0") {
+                                $response['updationstatus'] = "0";
+                                $response['message'] = "No data avaliable";
+                            } else {
+                                $response['updationstatus'] = "2";
+                                $response['message'] = "updation not requried";
+                            }
+                            $response["subcategory"] = $item;
+                            $response["error"] = false;
+                            $response["unitime"] = $time;
+                            $response["subid"] = $subid;
+                        }
+                    }
+                    else{
+                        foreach ($result as  $value) {
+                            $item[] = $value;
+                        }
+
+                        $getitembysubcat = $this->Model->newgetitembysubcat(array("p.id","p.item_id","CONCAT(p.`item_name`, ' ', p.`item_size`) as item_name","p.`item_sdesc`","p.`item_fdesc`","p.`item_price`","p.`item_status`","p.`Sales_tax`","inl.subcat_id","sub.sub_name","IFNULL( ROUND( AVG( pr.rating ) ) , 0 ) AS rating_average","itmg.imageurl as item_image"),$storeid,$subid,array('inl.subcat_id' => $subid,'p.item_status' =>0,'p.unitime >' => $unitime, 'inl.status' =>0),'p.`item_id`','sub.sub_id','ASC','15', $pageno);
+                        $items = array();
+                        if (count($getitembysubcat) > 0) {
+
+                            foreach ($getitembysubcat as $values) {
+                                $items[] = array_map('utf8_encode', $values);
+                            }
+
+                            if ($unitime == "0") {
+                                $response['updationstatus'] = "1";
+                                $response['message'] = "items get successfully";
+                            } else {
+                                $response['updationstatus'] = "3";
+                                $response['message'] = "updation requried";
+                            } 
+                        }
+                        else {
+                            if ($unitime == "0") {
+                                $response['updationstatus'] = "0";
+                                $response['message'] = "No data avaliable";
+                            } else {
+                                $response['updationstatus'] = "2";
+                                $response['message'] = "updation not requried";
+                            }
+                        }
+                        $response["item"] = $items;
+                        $response["subcategory"] = $item;
+                        $response["error"] = false;
+                        $response["unitime"] = $time;
+                        $response["subid"] = $subid;
+                    }
+                }
+                else {
+                    $response["error"] = true;
+                    $response["message"] = "The requested resource doesn't exists";
+                }
+            }else{
+                $response["error"] = true;
+                $response["message"] = "The requested resource doesn't exists";
+            }
+        }
+        else{
+            $response["error"] = true;
+            $response["message"] = "Invalid Store";
+        }
+        responseJSON($response);
+    }
+
+    //----------------orders-------------------
+    public function orders($storeid){
+        $response = array();
+        $api_key  = $this->input->get_request_header('Authorization');
+        if($api_key != ''){
+            $userid = getuserid('users',$api_key);
+            $order = $this->Mobile->getmyneworder($userid,$storeid);
+            if(count($order) > 0){
+                $response["error"] = false;
+                $response["order"] = array();
+                $response["currentunitime"] = time();
+                $response["message"] = "order list get sucessfuly";
+                foreach ($order as $key => $value) {
+                    if ($value['is_order_edit'] == "2") {
+                        $abc["trans_history"] = array();
+                        $order_transhistory = $this->Model->get_record('order_trans_history',array('orderid' => $value['order_id']));
+                        if (count($order_transhistory) > 0) {
+                            foreach ($order_transhistory as $ot){
+                                array_push($abc["trans_history"], $ot);
+                            }
+                            $value['transhistory'] = $abc["trans_history"];
+                        }
+                    }
+                    array_push($response["order"], $value);
+                }
+            }else {
+                $response["error"] = true;
+                $response["message"] = "No Order Found";
+            }
+        }else{
+            $response["error"] = true;
+            $response['message'] = 'Api key is misssing';
+        }
+        responseJSON($response);
+    }
+
+    //---------------orderdetail---------------
+    public function orderdetail($orderid,$storeid){
+        $response = array();
+        $api_key  = $this->input->get_request_header('Authorization');
+        if($api_key != ''){
+            $userid = getuserid('users',$api_key);
+            $check_ord = $this->Model->getorderbyid($orderid, $userid,$storeid);
+            if (count($check_ord) > 0) {
+                $order = $check_ord[0];
+                $response["orderdetail"] = array();
+                $response["orderstatus"] = array();
+                $resp = $this->Model->getcartitembyorderid($orderid,$order['store_id']);
+                $ordstat = $this->Model->get_selected_data(array(`order_id`, `updateby_id`, `status`, `message`, `updatetime`),'order_status_info',array('order_id'=>$orderid),'updatetime','DESC');
+                if ($order['is_order_edit'] == "2") {
+                    $response["trans_history"] = array();
+                    $reds = $this->Model->get_record('order_trans_history',array('orderid'=>$orderid));
+                    if (count($reds) > 0) {
+                        foreach ($reds as $subcatl ) {
+                           array_push($response["trans_history"], $subcatl);
+                        }
+                    }
+                }
+
+                $order['discount_label'] = 'Discount';
+                if($order['coupanid'] == -1){
+                    $order['discount_label'] = 'Referral Discount';
+                } else if($order['coupanid'] >= 1){
+                    $order['discount_label'] = 'Promocode Discount';
+                }
+
+                if (count($resp) > 0) {
+                    foreach ($resp as $item ) {
+                        $item = array_map('utf8_encode', $item);
+                        array_push($response["orderdetail"], $item);
+                    }
+                }
+                if (count($ordstat) > 0) {
+                    foreach ($ordstat as $ords ) {
+                        array_push($response["orderstatus"], $ords);
+                    }
+                }
+
+
+                $response["error"] = false;
+                $order['shipping_address'] = get_compatible_address($order['shipping_address']);
+                $response["order"] = $order;
+                $response["message"] = "order list get sucessfuly";
+                foreach ($check_ord as $subcat ) {
+                    array_push($response["order"], $subcat);
+                }
+            } 
+            else {
+                $response["error"] = true;
+                $response["message"] = "No Order Found";
+            }
+        }
+        else{
+            $response["error"] = true;
+            $response['message'] = 'Api key is misssing';
+        }
+        responseJSON($response);
+    }
+
+}
